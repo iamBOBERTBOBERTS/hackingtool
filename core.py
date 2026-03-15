@@ -61,8 +61,9 @@ def _show_inline_help():
             ("  Navigation\n", "bold white"),
             ("  ─────────────────────────────────\n", "dim"),
             ("  1–N    ", "bold cyan"), ("select item\n", "white"),
+            ("  97     ", "bold cyan"), ("install all (in category)\n", "white"),
             ("  99     ", "bold cyan"), ("go back\n", "white"),
-            ("  98     ", "bold cyan"), ("open project page\n", "white"),
+            ("  98     ", "bold cyan"), ("open project page / archived\n", "white"),
             ("  ?      ", "bold cyan"), ("show this help\n", "white"),
             ("  q      ", "bold cyan"), ("quit hackingtool\n", "white"),
         ),
@@ -333,6 +334,13 @@ class HackingToolsCollection:
                 status = "[green]✔[/green]" if tool.is_installed else "[dim]✘[/dim]"
                 table.add_row(str(index), status, tool.TITLE, desc)
 
+            # Count not-installed tools for "Install All" label
+            not_installed = [t for t in active if not t.is_installed]
+            if not_installed:
+                table.add_row(
+                    "[bold green]97[/bold green]", "",
+                    f"[bold green]Install all ({len(not_installed)} not installed)[/bold green]", "",
+                )
             if archived:
                 table.add_row("[dim]98[/dim]", "", f"[archived]Archived tools ({len(archived)})[/archived]", "")
             if incompatible:
@@ -362,6 +370,18 @@ class HackingToolsCollection:
 
             if choice == 99:
                 return
+            elif choice == 97 and not_installed:
+                console.print(Panel(
+                    f"[bold]Installing {len(not_installed)} tools...[/bold]",
+                    border_style="green", box=box.ROUNDED,
+                ))
+                for i, tool in enumerate(not_installed, start=1):
+                    console.print(f"\n[bold cyan]({i}/{len(not_installed)})[/bold cyan] {tool.TITLE}")
+                    try:
+                        tool.install()
+                    except Exception:
+                        console.print(f"[error]✘ Failed: {tool.TITLE}[/error]")
+                Prompt.ask("\n[dim]Press Enter to continue[/dim]", default="")
             elif choice == 98 and archived:
                 self._show_archived_tools()
             elif 1 <= choice <= len(active):
