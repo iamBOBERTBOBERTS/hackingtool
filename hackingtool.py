@@ -122,6 +122,7 @@ def show_help():
             ("  1–20   ", "bold cyan"), ("open a category\n", "white"),
             ("  21     ", "bold cyan"), ("Update / Uninstall hackingtool\n", "white"),
             ("  / or s ", "bold cyan"), ("search tools by name or keyword\n", "white"),
+            ("  t      ", "bold cyan"), ("filter tools by tag (osint, web, c2, ...)\n", "white"),
             ("  ?      ", "bold cyan"), ("show this help\n", "white"),
             ("  q      ", "bold cyan"), ("quit hackingtool\n\n", "white"),
             ("  Inside a category\n", "bold white"),
@@ -317,6 +318,7 @@ def build_menu():
     console.print(
         "  [dim]Enter number  ·  "
         "[bold cyan]/[/bold cyan] search  ·  "
+        "[bold cyan]t[/bold cyan] tags  ·  "
         "[bold cyan]?[/bold cyan] help  ·  "
         "[bold cyan]q[/bold cyan] quit[/dim]\n"
     )
@@ -340,6 +342,92 @@ def _collect_all_tools() -> list[tuple]:
     return results
 
 
+def _get_all_tags() -> dict[str, list[tuple]]:
+    """Build tag → [(tool, category)] index from all tools."""
+    import re
+    _rules = {
+        r'(osint|harvester|maigret|holehe|spiderfoot|sherlock|recon)': 'osint',
+        r'(subdomain|subfinder|amass|sublist|subdomainfinder)': 'recon',
+        r'(scanner|scan|nmap|masscan|rustscan|nikto|nuclei|trivy)': 'scanner',
+        r'(brute|gobuster|ffuf|dirb|dirsearch|ferox|hashcat|john|kerbrute)': 'bruteforce',
+        r'(web|http|proxy|zap|xss|sql|wafw00f|arjun|caido|mitmproxy)': 'web',
+        r'(wireless|wifi|wlan|airgeddon|bettercap|wifite|fluxion|deauth)': 'wireless',
+        r'(phish|social.media|evilginx|setoolkit|social.fish|social.engineer)': 'social-engineering',
+        r'(c2|sliver|havoc|mythic|pwncat|reverse.shell|pyshell)': 'c2',
+        r'(privesc|peass|linpeas|winpeas)': 'privesc',
+        r'(tunnel|pivot|ligolo|chisel|proxy|anon)': 'network',
+        r'(password|credential|hash|crack|secret|trufflehog|gitleaks)': 'credentials',
+        r'(forensic|memory|volatility|binwalk|autopsy|wireshark|pspy)': 'forensics',
+        r'(reverse.eng|ghidra|radare|jadx|androguard|apk)': 'reversing',
+        r'(cloud|aws|azure|gcp|kubernetes|prowler|scout|pacu)': 'cloud',
+        r'(mobile|android|ios|frida|mobsf|objection|droid)': 'mobile',
+        r'(active.directory|bloodhound|netexec|impacket|responder|certipy|kerberos|winrm|smb|ldap)': 'active-directory',
+        r'(ddos|dos|slowloris|goldeneye|ufonet)': 'ddos',
+        r'(payload|msfvenom|fatrat|venom|stitch|enigma)': 'payload',
+        r'(crawler|spider|katana|gospider)': 'crawler',
+    }
+    tag_index: dict[str, list[tuple]] = {}
+    for tool, cat in _collect_all_tools():
+        combined = f"{tool.TITLE} {tool.DESCRIPTION}".lower()
+        # Manual tags first
+        tool_tags = set(getattr(tool, "TAGS", []) or [])
+        # Auto-derive tags from title/description
+        for pattern, tag in _rules.items():
+            if re.search(pattern, combined, re.IGNORECASE):
+                tool_tags.add(tag)
+        for t in tool_tags:
+            tag_index.setdefault(t, []).append((tool, cat))
+    return tag_index
+
+
+def filter_by_tag():
+    """Show available tags, user picks one, show matching tools."""
+    tag_index = _get_all_tags()
+    sorted_tags = sorted(tag_index.keys())
+
+    # Show tags in a compact grid
+    console.print(Panel(
+        "  ".join(f"[bold cyan]{t}[/bold cyan]([dim]{len(tag_index[t])}[/dim])" for t in sorted_tags),
+        title="[bold magenta] Available Tags [/bold magenta]",
+        border_style="magenta", box=box.ROUNDED, padding=(0, 2),
+    ))
+
+    tag = Prompt.ask("[bold cyan]Enter tag[/bold cyan]", default="").strip().lower()
+    if not tag or tag not in tag_index:
+        if tag:
+            console.print(f"[dim]Tag '{tag}' not found.[/dim]")
+            Prompt.ask("[dim]Press Enter to return[/dim]", default="")
+        return
+
+    matches = tag_index[tag]
+    table = Table(
+        title=f"Tools tagged '{tag}'",
+        box=box.SIMPLE_HEAD, show_lines=True,
+    )
+    table.add_column("No.", justify="center", style="bold cyan", width=5)
+    table.add_column("", width=2)
+    table.add_column("Tool", style="bold yellow", min_width=20)
+    table.add_column("Category", style="magenta", min_width=15)
+
+    for i, (tool, cat) in enumerate(matches, start=1):
+        status = "[green]✔[/green]" if tool.is_installed else "[dim]✘[/dim]"
+        table.add_row(str(i), status, tool.TITLE, cat)
+
+    table.add_row("99", "", "Back to main menu", "")
+    console.print(table)
+
+    raw = Prompt.ask("[bold cyan]>[/bold cyan]", default="").strip()
+    if not raw or raw == "99":
+        return
+    try:
+        idx = int(raw)
+    except ValueError:
+        return
+    if 1 <= idx <= len(matches):
+        tool, cat = matches[idx - 1]
+        tool.show_options()
+
+
 def search_tools():
     """Interactive search — user types query, results update, select to jump."""
     query = Prompt.ask("[bold cyan]/ Search[/bold cyan]", default="").strip().lower()
@@ -348,12 +436,13 @@ def search_tools():
 
     all_tool_list = _collect_all_tools()
 
-    # Match against title + description
+    # Match against title + description + tags
     matches = []
     for tool, category in all_tool_list:
         title = (tool.TITLE or "").lower()
         desc = (tool.DESCRIPTION or "").lower()
-        if query in title or query in desc:
+        tags = " ".join(getattr(tool, "TAGS", []) or []).lower()
+        if query in title or query in desc or query in tags:
             matches.append((tool, category))
 
     if not matches:
@@ -413,6 +502,10 @@ def interact_menu():
 
             if raw.startswith("/") or raw in ("s", "search"):
                 search_tools()
+                continue
+
+            if raw in ("t", "tag", "tags", "filter"):
+                filter_by_tag()
                 continue
 
             if raw in ("q", "quit", "exit"):

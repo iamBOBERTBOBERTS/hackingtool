@@ -92,6 +92,9 @@ class HackingTool:
     REQUIRES_JAVA: bool     = False
     REQUIRES_DOCKER: bool   = False
 
+    # Tags for search/filter (e.g. ["osint", "web", "recon", "scanner"])
+    TAGS: list[str]         = []
+
     # Archived tool flags
     ARCHIVED: bool          = False
     ARCHIVED_REASON: str    = ""
