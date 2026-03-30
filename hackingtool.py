@@ -10,6 +10,35 @@ if sys.version_info < (3, 10):
     )
     sys.exit(1)
 
+
+def _maybe_use_project_venv() -> None:
+    """If ./.venv exists, re-exec with its Python (skip with HACKINGTOOL_NO_VENV=1)."""
+    import os
+    from pathlib import Path
+
+    if os.environ.get("HACKINGTOOL_NO_VENV", "").strip():
+        return
+    root = Path(__file__).resolve().parent
+    if sys.platform.startswith("win"):
+        candidates = [root / ".venv" / "Scripts" / "python.exe"]
+    else:
+        candidates = [
+            root / ".venv" / "bin" / "python3",
+            root / ".venv" / "bin" / "python",
+        ]
+    venv_py = next((p for p in candidates if p.is_file()), None)
+    if venv_py is None:
+        return
+    try:
+        if Path(sys.executable).resolve() == venv_py.resolve():
+            return
+    except OSError:
+        return
+    os.execv(str(venv_py), [str(venv_py), str(Path(__file__).resolve()), *sys.argv[1:]])
+
+
+_maybe_use_project_venv()
+
 import os
 import platform
 import socket

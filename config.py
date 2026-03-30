@@ -1,9 +1,10 @@
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
-from constants import USER_CONFIG_FILE, USER_TOOLS_DIR, DEFAULT_CONFIG
+from constants import USER_CONFIG_FILE, USER_TOOLS_DIR, DEFAULT_CONFIG, resolve_default_tools_dir
 
 logger = logging.getLogger(__name__)
 
@@ -13,10 +14,21 @@ def load() -> dict[str, Any]:
     if USER_CONFIG_FILE.exists():
         try:
             on_disk = json.loads(USER_CONFIG_FILE.read_text())
-            return {**DEFAULT_CONFIG, **on_disk}
+            cfg: dict[str, Any] = {**DEFAULT_CONFIG, **on_disk}
         except (json.JSONDecodeError, OSError) as exc:
             logger.warning("Config file unreadable (%s), using defaults.", exc)
-    return dict(DEFAULT_CONFIG)
+            cfg = dict(DEFAULT_CONFIG)
+    else:
+        cfg = dict(DEFAULT_CONFIG)
+
+    # Session overrides — dev workflow / explicit path without editing config.json
+    explicit = os.environ.get("HACKINGTOOL_TOOLS_DIR", "").strip()
+    if explicit:
+        cfg["tools_dir"] = str(Path(explicit).expanduser().resolve())
+    elif os.environ.get("HACKINGTOOL_DEV", "").lower() in ("1", "true", "yes"):
+        cfg["tools_dir"] = str(resolve_default_tools_dir())
+
+    return cfg
 
 
 def save(cfg: dict[str, Any]) -> None:

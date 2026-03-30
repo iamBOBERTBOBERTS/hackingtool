@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import os
 from pathlib import Path
 import platform
 import shutil as _shutil
@@ -7,6 +10,34 @@ REPO_OWNER   = "Z4nzu"
 REPO_NAME    = "hackingtool"
 REPO_URL     = f"https://github.com/{REPO_OWNER}/{REPO_NAME}.git"
 REPO_WEB_URL = f"https://github.com/{REPO_OWNER}/{REPO_NAME}"
+
+# Directory containing this file (project / install root)
+REPO_ROOT = Path(__file__).resolve().parent
+
+
+def resolve_default_tools_dir() -> Path:
+    """
+    Default directory for git clones and tool installs.
+
+    Priority:
+      1. HACKINGTOOL_TOOLS_DIR — explicit path (any layout)
+      2. HACKINGTOOL_DEV=1 — <repo>/tools when running from a source tree
+      3. ~/.hackingtool/tools
+    """
+    explicit = os.environ.get("HACKINGTOOL_TOOLS_DIR", "").strip()
+    if explicit:
+        p = Path(explicit).expanduser().resolve()
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    if os.environ.get("HACKINGTOOL_DEV", "").lower() in ("1", "true", "yes"):
+        if (REPO_ROOT / "hackingtool.py").exists():
+            d = (REPO_ROOT / "tools").resolve()
+            d.mkdir(parents=True, exist_ok=True)
+            return d
+
+    return Path.home() / f".{REPO_NAME}" / "tools"
+
 
 # ── Versioning ────────────────────────────────────────────────────────────────
 VERSION         = "2.0.0"
@@ -19,6 +50,7 @@ MIN_PYTHON = (3, 10)
 # NEVER hardcode /home/username — use Path.home() so it works for any user,
 # including root (/root), regular users (/home/alice), macOS (/Users/alice).
 USER_CONFIG_DIR  = Path.home() / f".{REPO_NAME}"
+# Fallback key when config has no tools_dir; production default is home-based.
 USER_TOOLS_DIR   = USER_CONFIG_DIR / "tools"
 USER_CONFIG_FILE = USER_CONFIG_DIR / "config.json"
 USER_LOG_FILE    = USER_CONFIG_DIR / f"{REPO_NAME}.log"
@@ -51,7 +83,7 @@ THEME_ACCENT   = "bold cyan"
 
 # ── Default config values ──────────────────────────────────────────────────────
 DEFAULT_CONFIG: dict = {
-    "tools_dir":      str(USER_TOOLS_DIR),
+    "tools_dir":      str(resolve_default_tools_dir()),
     "version":        VERSION,
     "theme":          "magenta",
     "show_archived":  False,

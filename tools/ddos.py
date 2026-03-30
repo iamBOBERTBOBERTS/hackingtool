@@ -114,6 +114,7 @@ class GoldenEye(HackingTool):
 class Saphyra(HackingTool):
     TITLE = "SaphyraDDoS"
     SUPPORTED_OS = ["linux"]
+    TAGS = ["ddos"]
     DESCRIPTION = "A Python DDoS script for SECURITY TESTING PURPOSES ONLY."
     INSTALL_COMMANDS = [
         # Bug 7 fix: removed "sudo su" (first step was dropping into interactive root shell)

@@ -1,4 +1,12 @@
 # coding=utf-8
+"""
+Regenerate README from README_template.md ({{toc}}, {{tools}} only).
+
+The checked-in README.md includes extra marketing sections (badges, category
+counts, logo). Running this script overwrites README.md with the template
+body — use only when the template has been brought in sync, or restore sections
+from git afterward.
+"""
 import re
 
 from rich.console import Console

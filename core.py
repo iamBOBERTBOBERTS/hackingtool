@@ -1,5 +1,6 @@
 import os
 import shutil
+import subprocess
 import sys
 import webbrowser
 from collections.abc import Callable
@@ -35,6 +36,12 @@ _theme = Theme({
 
 # Single shared console — all tool files do: from core import console
 console = Console(theme=_theme)
+
+
+def _tools_base() -> str:
+    """Absolute path where git clones and install commands should run."""
+    from config import get_tools_dir
+    return str(get_tools_dir())
 
 
 def clear_screen():
@@ -117,6 +124,7 @@ class HackingTool:
     @property
     def is_installed(self) -> bool:
         """Check if the tool's binary is on PATH or its clone dir exists."""
+        base = _tools_base()
         if self.RUN_COMMANDS:
             cmd = self.RUN_COMMANDS[0]
             # Handle "cd foo && binary --help" pattern
@@ -128,7 +136,15 @@ class HackingTool:
             if binary and binary not in (".", "echo", "cd"):
                 if shutil.which(binary):
                     return True
-        # Check if git clone target dir exists
+            # Relative working dir from "cd dir && …" may exist under tools base
+            raw0 = self.RUN_COMMANDS[0]
+            if "&&" in raw0:
+                cd_part = raw0.split("&&")[0].strip()
+                if cd_part.startswith("cd "):
+                    rel = cd_part[3:].strip()
+                    if rel and os.path.isdir(os.path.join(base, rel)):
+                        return True
+        # Check if git clone target dir exists under tools base (not process CWD)
         if self.INSTALL_COMMANDS:
             for ic in self.INSTALL_COMMANDS:
                 if "git clone" in ic:
@@ -136,7 +152,10 @@ class HackingTool:
                     repo_url = [p for p in parts if p.startswith("http")]
                     if repo_url:
                         dirname = repo_url[0].rstrip("/").rsplit("/", 1)[-1].replace(".git", "")
-                        if os.path.isdir(dirname):
+                        url_idx = parts.index(repo_url[0])
+                        if url_idx + 1 < len(parts) and not parts[url_idx + 1].startswith("-"):
+                            dirname = parts[url_idx + 1]
+                        if os.path.isdir(os.path.join(base, dirname)):
                             return True
         return False
 
@@ -209,10 +228,11 @@ class HackingTool:
 
     def install(self):
         self.before_install()
+        td = _tools_base()
         if isinstance(self.INSTALL_COMMANDS, (list, tuple)):
             for cmd in self.INSTALL_COMMANDS:
                 console.print(f"[warning]→ {cmd}[/warning]")
-                os.system(cmd)
+                subprocess.run(cmd, shell=True, cwd=td, check=False)
         self.after_install()
 
     def after_install(self):
@@ -223,10 +243,11 @@ class HackingTool:
 
     def uninstall(self):
         if self.before_uninstall():
+            td = _tools_base()
             if isinstance(self.UNINSTALL_COMMANDS, (list, tuple)):
                 for cmd in self.UNINSTALL_COMMANDS:
                     console.print(f"[error]→ {cmd}[/error]")
-                    os.system(cmd)
+                    subprocess.run(cmd, shell=True, cwd=td, check=False)
         self.after_uninstall()
 
     def after_uninstall(self): pass
@@ -237,6 +258,7 @@ class HackingTool:
             console.print("[warning]Tool is not installed yet. Install it first.[/warning]")
             return
 
+        base = _tools_base()
         updated = False
         for ic in (self.INSTALL_COMMANDS or []):
             if "git clone" in ic:
@@ -245,25 +267,32 @@ class HackingTool:
                 repo_urls = [p for p in parts if p.startswith("http")]
                 if repo_urls:
                     dirname = repo_urls[0].rstrip("/").rsplit("/", 1)[-1].replace(".git", "")
-                    if os.path.isdir(dirname):
-                        console.print(f"[cyan]→ git -C {dirname} pull[/cyan]")
-                        os.system(f"git -C {dirname} pull")
+                    url_idx = parts.index(repo_urls[0])
+                    if url_idx + 1 < len(parts) and not parts[url_idx + 1].startswith("-"):
+                        dirname = parts[url_idx + 1]
+                    repo_path = os.path.join(base, dirname)
+                    if os.path.isdir(repo_path):
+                        console.print(f"[cyan]→ git -C {repo_path} pull[/cyan]")
+                        subprocess.run(
+                            ["git", "-C", repo_path, "pull"],
+                            check=False,
+                        )
                         updated = True
             elif "pip install" in ic:
                 # Re-run pip install (--upgrade)
                 upgrade_cmd = ic.replace("pip install", "pip install --upgrade")
                 console.print(f"[cyan]→ {upgrade_cmd}[/cyan]")
-                os.system(upgrade_cmd)
+                subprocess.run(upgrade_cmd, shell=True, cwd=base, check=False)
                 updated = True
             elif "go install" in ic:
                 # Re-run go install (fetches latest)
                 console.print(f"[cyan]→ {ic}[/cyan]")
-                os.system(ic)
+                subprocess.run(ic, shell=True, cwd=base, check=False)
                 updated = True
             elif "gem install" in ic:
                 upgrade_cmd = ic.replace("gem install", "gem update")
                 console.print(f"[cyan]→ {upgrade_cmd}[/cyan]")
-                os.system(upgrade_cmd)
+                subprocess.run(upgrade_cmd, shell=True, cwd=base, check=False)
                 updated = True
 
         if updated:
@@ -273,6 +302,7 @@ class HackingTool:
 
     def _get_tool_dir(self) -> str | None:
         """Find the tool's local directory — clone target, pip location, or binary path."""
+        base = _tools_base()
         # 1. Check git clone target dir
         for ic in (self.INSTALL_COMMANDS or []):
             if "git clone" in ic:
@@ -283,10 +313,11 @@ class HackingTool:
                     dirname = repo_urls[0].rstrip("/").rsplit("/", 1)[-1].replace(".git", "")
                     # Check custom target dir (arg after URL)
                     url_idx = parts.index(repo_urls[0])
-                    if url_idx + 1 < len(parts):
+                    if url_idx + 1 < len(parts) and not parts[url_idx + 1].startswith("-"):
                         dirname = parts[url_idx + 1]
-                    if os.path.isdir(dirname):
-                        return os.path.abspath(dirname)
+                    full = os.path.join(base, dirname)
+                    if os.path.isdir(full):
+                        return os.path.abspath(full)
 
         # 2. Check binary location via which
         if self.RUN_COMMANDS:
@@ -296,8 +327,9 @@ class HackingTool:
                 cd_part = cmd.split("&&")[0].strip()
                 if cd_part.startswith("cd "):
                     d = cd_part[3:].strip()
-                    if os.path.isdir(d):
-                        return os.path.abspath(d)
+                    full = os.path.join(base, d)
+                    if os.path.isdir(full):
+                        return os.path.abspath(full)
             binary = cmd.split()[0] if cmd else ""
             if binary.startswith("sudo"):
                 binary = cmd.split()[1] if len(cmd.split()) > 1 else ""
