@@ -1,43 +1,15 @@
-from __future__ import annotations
+"""Project-wide constants and path resolution helpers."""
 
-import os
 from pathlib import Path
 import platform
 import shutil as _shutil
+import os
 
 # ── Repository ────────────────────────────────────────────────────────────────
 REPO_OWNER   = "Z4nzu"
 REPO_NAME    = "hackingtool"
 REPO_URL     = f"https://github.com/{REPO_OWNER}/{REPO_NAME}.git"
 REPO_WEB_URL = f"https://github.com/{REPO_OWNER}/{REPO_NAME}"
-
-# Directory containing this file (project / install root)
-REPO_ROOT = Path(__file__).resolve().parent
-
-
-def resolve_default_tools_dir() -> Path:
-    """
-    Default directory for git clones and tool installs.
-
-    Priority:
-      1. HACKINGTOOL_TOOLS_DIR — explicit path (any layout)
-      2. HACKINGTOOL_DEV=1 — <repo>/tools when running from a source tree
-      3. ~/.hackingtool/tools
-    """
-    explicit = os.environ.get("HACKINGTOOL_TOOLS_DIR", "").strip()
-    if explicit:
-        p = Path(explicit).expanduser().resolve()
-        p.mkdir(parents=True, exist_ok=True)
-        return p
-
-    if os.environ.get("HACKINGTOOL_DEV", "").lower() in ("1", "true", "yes"):
-        if (REPO_ROOT / "hackingtool.py").exists():
-            d = (REPO_ROOT / "tools").resolve()
-            d.mkdir(parents=True, exist_ok=True)
-            return d
-
-    return Path.home() / f".{REPO_NAME}" / "tools"
-
 
 # ── Versioning ────────────────────────────────────────────────────────────────
 VERSION         = "2.0.0"
@@ -46,14 +18,37 @@ VERSION_DISPLAY = f"v{VERSION}"
 # ── Python requirement ────────────────────────────────────────────────────────
 MIN_PYTHON = (3, 10)
 
-# ── User-scoped paths (cross-platform, always computed at runtime) ─────────────
-# NEVER hardcode /home/username — use Path.home() so it works for any user,
-# including root (/root), regular users (/home/alice), macOS (/Users/alice).
-USER_CONFIG_DIR  = Path.home() / f".{REPO_NAME}"
-# Fallback key when config has no tools_dir; production default is home-based.
+# ── User-scoped paths (venv-contained when active) ────────────────────────────
+# If running inside a venv, keep all app state inside that environment to avoid
+# writing to the host user's home directory.
+_VENV_PATH = os.environ.get("VIRTUAL_ENV", "").strip()
+if _VENV_PATH:
+    USER_CONFIG_DIR = Path(_VENV_PATH).resolve() / f".{REPO_NAME}"
+else:
+    USER_CONFIG_DIR = Path.home() / f".{REPO_NAME}"
+
 USER_TOOLS_DIR   = USER_CONFIG_DIR / "tools"
 USER_CONFIG_FILE = USER_CONFIG_DIR / "config.json"
 USER_LOG_FILE    = USER_CONFIG_DIR / f"{REPO_NAME}.log"
+
+
+def resolve_default_tools_dir() -> Path:
+    """
+    Resolve the default tools directory with explicit environment precedence:
+    1) HACKINGTOOL_TOOLS_DIR
+    2) HACKINGTOOL_DEV=1 -> repo-local state dir
+    3) ~/.hackingtool/tools (or venv-contained equivalent)
+    """
+    env_tools_dir = os.environ.get("HACKINGTOOL_TOOLS_DIR", "").strip()
+    if env_tools_dir:
+        return Path(env_tools_dir).expanduser().resolve()
+
+    dev_mode = os.environ.get("HACKINGTOOL_DEV", "").strip().lower() in {"1", "true", "yes", "on"}
+    if dev_mode:
+        repo_root = Path(__file__).resolve().parent
+        return (repo_root / ".hackingtool" / "tools").resolve()
+
+    return USER_TOOLS_DIR
 
 # ── System install paths (set per OS) ─────────────────────────────────────────
 _system = platform.system()
@@ -87,6 +82,8 @@ DEFAULT_CONFIG: dict = {
     "version":        VERSION,
     "theme":          "magenta",
     "show_archived":  False,
+    "privacy_mode":   True,
+    "venv_contained": True,
     "sudo_binary":    "sudo",
     "go_bin_dir":     str(Path.home() / "go" / "bin"),
     "gem_bin_dir":    str(Path.home() / ".gem" / "ruby"),

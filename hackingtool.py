@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+"""Interactive hackingtool launcher and category router."""
+
+# flake8: noqa
+# pylint: disable=too-many-lines,missing-module-docstring,missing-class-docstring,missing-function-docstring
+# pylint: disable=wrong-import-position,import-outside-toplevel,line-too-long,broad-exception-caught
+# pylint: disable=redefined-outer-name,reimported,unused-import
+
 import sys
 
 # ── Python version guard (must be before any other local import) ───────────────
@@ -11,53 +18,98 @@ if sys.version_info < (3, 10):
     sys.exit(1)
 
 
-def _maybe_use_project_venv() -> None:
-    """If ./.venv exists, re-exec with its Python (skip with HACKINGTOOL_NO_VENV=1)."""
+def _load_repo_dotenv() -> None:
+    """Load KEY=value from repo-root .env if present (no python-dotenv dependency)."""
     import os
     from pathlib import Path
 
-    if os.environ.get("HACKINGTOOL_NO_VENV", "").strip():
-        return
-    root = Path(__file__).resolve().parent
-    if sys.platform.startswith("win"):
-        candidates = [root / ".venv" / "Scripts" / "python.exe"]
-    else:
-        candidates = [
-            root / ".venv" / "bin" / "python3",
-            root / ".venv" / "bin" / "python",
-        ]
-    venv_py = next((p for p in candidates if p.is_file()), None)
-    if venv_py is None:
+    env_path = Path(__file__).resolve().parent / ".env"
+    if not env_path.is_file():
         return
     try:
-        if Path(sys.executable).resolve() == venv_py.resolve():
-            return
+        for raw in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key = key.strip()
+            if not key:
+                continue
+            val = val.strip().strip("'").strip('"')
+            if key not in os.environ:
+                os.environ[key] = val
     except OSError:
-        return
-    os.execv(str(venv_py), [str(venv_py), str(Path(__file__).resolve()), *sys.argv[1:]])
+        pass
 
 
-_maybe_use_project_venv()
+_load_repo_dotenv()
 
 import os
 import platform
 import socket
 import datetime
 import random
+import json
+import re
+import shutil
+import subprocess
 import webbrowser
+from pathlib import Path
 from itertools import zip_longest
+from dataclasses import dataclass
 
-from rich.console import Console
+
+def _is_truthy_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def maybe_use_project_venv() -> bool:
+    """
+    In dev mode, auto-wire a repo-local venv so running without manual activation works.
+    Search order: venv-dillons-clapped → .venv → venv.
+    """
+    if not _is_truthy_env("HACKINGTOOL_DEV"):
+        return False
+
+    if os.environ.get("VIRTUAL_ENV") or (sys.prefix != getattr(sys, "base_prefix", sys.prefix)):
+        return True
+
+    repo_root = Path(__file__).resolve().parent
+    py_tag = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    for name in ("venv-dillons-clapped", ".venv", "venv"):
+        venv_dir = repo_root / name
+        if not venv_dir.is_dir():
+            continue
+        site_pkgs = venv_dir / "lib" / py_tag / "site-packages"
+        if not site_pkgs.is_dir():
+            continue
+        os.environ["VIRTUAL_ENV"] = str(venv_dir)
+        os.environ["PATH"] = f"{venv_dir / 'bin'}:{os.environ.get('PATH', '')}"
+        os.environ.pop("PYTHONHOME", None)
+        site_path = str(site_pkgs)
+        if site_path not in sys.path:
+            sys.path.insert(0, site_path)
+        return True
+
+    print(
+        "[WARN] HACKINGTOOL_DEV=1 but no usable repo venv was found "
+        "(venv-dillons-clapped, .venv, or venv with site-packages). "
+        "Continuing without auto-activation.",
+        file=sys.stderr,
+    )
+    return False
+
+
+maybe_use_project_venv()
+
 from rich.panel import Panel
 from rich.table import Table
 from rich.prompt import Prompt, Confirm
-from rich.align import Align
 from rich.text import Text
 from rich import box
 from rich.rule import Rule
-from rich.columns import Columns
 
-from core import HackingToolsCollection, clear_screen, console
+from core import HackingTool, HackingToolsCollection, clear_screen, console
 from constants import VERSION_DISPLAY, REPO_WEB_URL
 from config import get_tools_dir
 from tools.anonsurf import AnonSurfTools
@@ -81,6 +133,171 @@ from tools.xss_attack import XSSAttackTools
 from tools.active_directory import ActiveDirectoryTools
 from tools.cloud_security import CloudSecurityTools
 from tools.mobile_security import MobileSecurityTools
+
+
+@dataclass
+class SmartIntent:
+    action: str
+    query: str = ""
+    confidence: float = 0.0
+    reasoning: str = ""
+
+
+class SmartInputEngine:
+    """Optional local-LLM intent parser with deterministic fallback."""
+
+    def __init__(self, model: str = "llama3.2:3b"):
+        self.model = model
+
+    @property
+    def ollama_available(self) -> bool:
+        return shutil.which("ollama") is not None
+
+    def _model_installed(self) -> bool:
+        if not self.ollama_available:
+            return False
+        try:
+            result = subprocess.run(
+                ["ollama", "list"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode != 0:
+                return False
+            return self.model in result.stdout
+        except (OSError, subprocess.SubprocessError, TimeoutError):
+            return False
+
+    def status_line(self) -> str:
+        if not self.ollama_available:
+            return "local AI offline (install ollama for smart parsing)"
+        if self._model_installed():
+            return f"local AI online ({self.model})"
+        return f"ollama detected, model missing ({self.model})"
+
+    def set_model(self, model_name: str) -> None:
+        self.model = model_name.strip()
+
+    def install_hint(self) -> str:
+        return (
+            "Install: curl -fsSL https://ollama.com/install.sh | sh\n"
+            f"Then: ollama pull {self.model}"
+        )
+
+    def interpret(self, raw_text: str) -> SmartIntent:
+        text = (raw_text or "").strip()
+        if not text:
+            return SmartIntent(action="none", query="", confidence=0.0)
+
+        if self.ollama_available and self._model_installed():
+            llm_intent = self._interpret_with_llm(text)
+            if llm_intent is not None:
+                return llm_intent
+
+        return self._interpret_with_rules(text)
+
+    def _interpret_with_llm(self, text: str) -> SmartIntent | None:
+        prompt = (
+            "You are an intent classifier for a terminal cybersecurity tool. "
+            "Return only compact JSON with keys: action, query, confidence, reasoning. "
+            "Allowed action values: search, tag, recommend, open_help, none. "
+            "If unsure, use none.\n\n"
+            f"User input: {text}"
+        )
+
+        try:
+            result = subprocess.run(
+                ["ollama", "run", self.model, prompt],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=12,
+            )
+            if result.returncode != 0:
+                return None
+
+            payload = self._extract_json_object(result.stdout)
+            if not payload:
+                return None
+
+            action = str(payload.get("action", "none")).strip().lower()
+            query = str(payload.get("query", text)).strip()
+            confidence = float(payload.get("confidence", 0.0))
+            reasoning = str(payload.get("reasoning", "")).strip()
+
+            if action not in {"search", "tag", "recommend", "open_help", "none"}:
+                action = "none"
+
+            return SmartIntent(
+                action=action,
+                query=query,
+                confidence=max(0.0, min(confidence, 1.0)),
+                reasoning=reasoning,
+            )
+        except (OSError, subprocess.SubprocessError, TimeoutError, ValueError, TypeError):
+            return None
+
+    @staticmethod
+    def _extract_json_object(text: str) -> dict | None:
+        if not text:
+            return None
+        text = text.strip()
+
+        try:
+            obj = json.loads(text)
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            pass
+
+        match = re.search(r"\{[\s\S]*\}", text)
+        if not match:
+            return None
+        try:
+            obj = json.loads(match.group(0))
+            return obj if isinstance(obj, dict) else None
+        except json.JSONDecodeError:
+            return None
+
+    @staticmethod
+    def _interpret_with_rules(text: str) -> SmartIntent:
+        lowered = text.lower()
+
+        if any(k in lowered for k in ["help", "how to use", "commands", "?", "menu"]):
+            return SmartIntent(
+                action="open_help",
+                query=text,
+                confidence=0.85,
+                reasoning="matched help keywords",
+            )
+
+        if any(k in lowered for k in ["tag", "filter", "osint", "wireless", "cloud", "mobile", "active directory"]):
+            return SmartIntent(
+                action="tag",
+                query=text,
+                confidence=0.72,
+                reasoning="matched tag/filter terms",
+            )
+
+        if any(k in lowered for k in ["how do i", "i want to", "recommend", "best tool", "task", "need to"]):
+            return SmartIntent(
+                action="recommend",
+                query=text,
+                confidence=0.7,
+                reasoning="matched recommendation-style phrasing",
+            )
+
+        if len(text.split()) >= 2:
+            return SmartIntent(
+                action="search",
+                query=text,
+                confidence=0.62,
+                reasoning="default multi-word search fallback",
+            )
+
+        return SmartIntent(action="none", query=text, confidence=0.35, reasoning="insufficient signal")
 
 # ── Tool registry ──────────────────────────────────────────────────────────────
 
@@ -134,6 +351,8 @@ all_tools = [
     OtherTools(),
     ToolManager(),
 ]
+
+smart_engine = SmartInputEngine()
 
 # Used by generate_readme.py
 class AllTools(HackingToolsCollection):
@@ -205,6 +424,8 @@ _QUOTES = [
     '"Security is a process, not a product."',
 ]
 
+_COSMIC_STRIP = " ✦  COSMIC MODE  ✦  smart terminal routing  ✦  natural-language commands  ✦ "
+
 
 def _sys_info() -> dict:
     """Collect live system info for the header panel."""
@@ -213,7 +434,7 @@ def _sys_info() -> dict:
     # OS pretty name
     try:
         info["os"] = platform.freedesktop_os_release().get("PRETTY_NAME", "")
-    except Exception:
+    except (AttributeError, OSError, KeyError):
         info["os"] = ""
     if not info["os"]:
         info["os"] = f"{platform.system()} {platform.release()}"
@@ -223,7 +444,7 @@ def _sys_info() -> dict:
     # Current user
     try:
         info["user"] = os.getlogin()
-    except Exception:
+    except OSError:
         info["user"] = os.environ.get("USER", os.environ.get("LOGNAME", "root"))
 
     info["host"] = socket.gethostname()
@@ -235,7 +456,7 @@ def _sys_info() -> dict:
         s.connect(("10.254.254.254", 1))
         info["ip"] = s.getsockname()[0]
         s.close()
-    except Exception:
+    except OSError:
         info["ip"] = "127.0.0.1"
 
     info["time"] = datetime.datetime.now().strftime("%Y-%m-%d  %H:%M")
@@ -302,6 +523,15 @@ def _build_header() -> Panel:
 def build_menu():
     clear_screen()
     console.print(_build_header())
+    console.print(Panel(
+        f"[bold cyan]{_COSMIC_STRIP}[/bold cyan]",
+        border_style="cyan",
+        box=box.SIMPLE,
+        padding=(0, 1),
+    ))
+    console.print(
+        f"  [dim]AI:[/dim] [bold cyan]{smart_engine.status_line()}[/bold cyan]"
+    )
 
     # ── 2-column category grid ──
     # Items 1-17 in two columns, item 18 (ToolManager) shown separately
@@ -349,16 +579,17 @@ def build_menu():
         "  [dim cyan]/[/dim cyan][dim]search[/dim]  "
         "[dim cyan]t[/dim cyan] [dim]tags[/dim]  "
         "[dim cyan]r[/dim cyan] [dim]recommend[/dim]  "
+        "[dim cyan]ai[/dim cyan] [dim]local-llm[/dim]  "
         "[dim cyan]?[/dim cyan] [dim]help[/dim]  "
         "[dim cyan]q[/dim cyan] [dim]quit[/dim]"
     )
+    console.print("  [dim]Tip: type plain language like 'find subdomains' or 'web vuln scan tools'[/dim]")
 
 
 # ── Search ─────────────────────────────────────────────────────────────────────
 
 def _collect_all_tools() -> list[tuple]:
     """Walk all collections and return (tool_instance, category_name) pairs."""
-    from core import HackingTool, HackingToolsCollection
     results = []
 
     def _walk(items, parent_title=""):
@@ -374,7 +605,6 @@ def _collect_all_tools() -> list[tuple]:
 
 def _get_all_tags() -> dict[str, list[tuple]]:
     """Build tag → [(tool, category)] index from all tools."""
-    import re
     _rules = {
         r'(osint|harvester|maigret|holehe|spiderfoot|sherlock|recon)': 'osint',
         r'(subdomain|subfinder|amass|sublist|subdomainfinder)': 'recon',
@@ -511,49 +741,71 @@ def recommend_tools():
 
     if 1 <= idx <= len(tasks):
         task = tasks[idx - 1]
-        tag_names = _RECOMMENDATIONS[task]
-        tag_index = _get_all_tags()
+        _show_recommendations_for_task(task)
 
-        # Collect unique tools across all matching tags
-        seen = set()
-        matches = []
-        for tag in tag_names:
-            for tool, cat in tag_index.get(tag, []):
-                if id(tool) not in seen:
-                    seen.add(id(tool))
-                    matches.append((tool, cat))
 
-        if not matches:
-            console.print("[dim]No tools found for this task.[/dim]")
-            Prompt.ask("[dim]Press Enter to return[/dim]", default="")
-            return
+def _show_recommendations_for_task(task: str):
+    tag_names = _RECOMMENDATIONS.get(task, [])
+    tag_index = _get_all_tags()
 
-        console.print(Panel(
-            f"[bold]Recommended tools for: {task.title()}[/bold]",
-            border_style="green", box=box.ROUNDED,
-        ))
+    # Collect unique tools across all matching tags.
+    seen = set()
+    matches = []
+    for tag in tag_names:
+        for tool, cat in tag_index.get(tag, []):
+            if id(tool) not in seen:
+                seen.add(id(tool))
+                matches.append((tool, cat))
 
-        rtable = Table(box=box.SIMPLE_HEAD, show_lines=True)
-        rtable.add_column("No.", justify="center", style="bold cyan", width=5)
-        rtable.add_column("", width=2)
-        rtable.add_column("Tool", style="bold yellow", min_width=20)
-        rtable.add_column("Category", style="magenta")
+    if not matches:
+        console.print("[dim]No tools found for this task.[/dim]")
+        Prompt.ask("[dim]Press Enter to return[/dim]", default="")
+        return
 
-        for i, (tool, cat) in enumerate(matches, start=1):
-            status = "[green]✔[/green]" if tool.is_installed else "[dim]✘[/dim]"
-            rtable.add_row(str(i), status, tool.TITLE, cat)
+    console.print(Panel(
+        f"[bold]Recommended tools for: {task.title()}[/bold]",
+        border_style="green", box=box.ROUNDED,
+    ))
 
-        rtable.add_row("99", "", "Back", "")
-        console.print(rtable)
+    rtable = Table(box=box.SIMPLE_HEAD, show_lines=True)
+    rtable.add_column("No.", justify="center", style="bold cyan", width=5)
+    rtable.add_column("", width=2)
+    rtable.add_column("Tool", style="bold yellow", min_width=20)
+    rtable.add_column("Category", style="magenta")
 
-        raw2 = Prompt.ask("[bold cyan]>[/bold cyan]", default="").strip()
-        if raw2 and raw2 != "99":
-            try:
-                ridx = int(raw2)
-                if 1 <= ridx <= len(matches):
-                    matches[ridx - 1][0].show_options()
-            except ValueError:
-                pass
+    for i, (tool, cat) in enumerate(matches, start=1):
+        status = "[green]✔[/green]" if tool.is_installed else "[dim]✘[/dim]"
+        rtable.add_row(str(i), status, tool.TITLE, cat)
+
+    rtable.add_row("99", "", "Back", "")
+    console.print(rtable)
+
+    raw2 = Prompt.ask("[bold cyan]>[/bold cyan]", default="").strip()
+    if raw2 and raw2 != "99":
+        try:
+            ridx = int(raw2)
+            if 1 <= ridx <= len(matches):
+                matches[ridx - 1][0].show_options()
+        except ValueError:
+            pass
+
+
+def _recommend_task_from_text(user_text: str) -> str | None:
+    if not user_text:
+        return None
+
+    words = set(w for w in user_text.lower().replace("/", " ").split() if len(w) > 2)
+    best_task = None
+    best_score = 0
+
+    for task in _RECOMMENDATIONS:
+        task_words = set(task.lower().replace("/", " ").split())
+        score = len(words.intersection(task_words))
+        if score > best_score:
+            best_score = score
+            best_task = task
+
+    return best_task if best_score > 0 else None
 
 
 def search_tools(query: str | None = None):
@@ -616,6 +868,78 @@ def search_tools(query: str | None = None):
         tool.show_options()
 
 
+def _show_ai_panel():
+    console.print(Panel(
+        "\n".join([
+            f"[bold cyan]Status:[/bold cyan] {smart_engine.status_line()}",
+            f"[bold cyan]Model:[/bold cyan] {smart_engine.model}",
+            "[dim]Commands: ai, ai status, ai model <name>, ai pull[/dim]",
+            f"[dim]{smart_engine.install_hint()}[/dim]",
+        ]),
+        title="[bold magenta] Local AI Assistant [/bold magenta]",
+        border_style="cyan",
+        box=box.ROUNDED,
+        padding=(0, 1),
+    ))
+
+
+def _handle_ai_command(raw_lower: str) -> bool:
+    if raw_lower in ("ai", "ai status"):
+        _show_ai_panel()
+        Prompt.ask("[dim]Press Enter to continue[/dim]", default="")
+        return True
+
+    if raw_lower.startswith("ai model "):
+        model = raw_lower.replace("ai model ", "", 1).strip()
+        if model:
+            smart_engine.set_model(model)
+            console.print(f"[green]Model set to:[/green] [bold]{smart_engine.model}[/bold]")
+        else:
+            console.print("[red]Provide a model name, e.g. ai model llama3.2:3b[/red]")
+        Prompt.ask("[dim]Press Enter to continue[/dim]", default="")
+        return True
+
+    if raw_lower == "ai pull":
+        if not smart_engine.ollama_available:
+            console.print("[red]ollama is not installed.[/red]")
+            console.print(f"[dim]{smart_engine.install_hint()}[/dim]")
+            Prompt.ask("[dim]Press Enter to continue[/dim]", default="")
+            return True
+
+        console.print(f"[cyan]Pulling model {smart_engine.model} ...[/cyan]")
+        os.system(f"ollama pull {smart_engine.model}")
+        Prompt.ask("[dim]Press Enter to continue[/dim]", default="")
+        return True
+
+    return False
+
+
+def _handle_smart_text(raw: str) -> bool:
+    intent = smart_engine.interpret(raw)
+    if intent.action == "none":
+        return False
+
+    if intent.action == "open_help":
+        show_help()
+        return True
+
+    if intent.action == "recommend":
+        task = _recommend_task_from_text(intent.query)
+        if task:
+            console.print(f"[dim]AI route:[/dim] [cyan]recommendation[/cyan] -> [bold]{task}[/bold]")
+            _show_recommendations_for_task(task)
+            return True
+        recommend_tools()
+        return True
+
+    if intent.action in ("search", "tag"):
+        console.print(f"[dim]AI route:[/dim] [cyan]search[/cyan] -> [bold]{intent.query}[/bold]")
+        search_tools(query=intent.query)
+        return True
+
+    return False
+
+
 # ── Main interaction loop ──────────────────────────────────────────────────────
 
 def interact_menu():
@@ -633,6 +957,9 @@ def interact_menu():
 
             if raw_lower in ("?", "help"):
                 show_help()
+                continue
+
+            if raw_lower.startswith("ai") and _handle_ai_command(raw_lower):
                 continue
 
             if raw.startswith("/"):
@@ -660,6 +987,11 @@ def interact_menu():
                 ))
                 break
 
+            # Natural language input routed through local LLM (if configured)
+            # with deterministic fallback rules.
+            if _handle_smart_text(raw):
+                continue
+
             try:
                 choice = int(raw_lower)
             except ValueError:
@@ -675,7 +1007,7 @@ def interact_menu():
                 ))
                 try:
                     all_tools[choice - 1].show_options()
-                except Exception as e:
+                except (RuntimeError, OSError, ValueError) as e:
                     console.print(Panel(
                         f"[red]Error while opening {title}[/red]\n{e}",
                         border_style="red",
@@ -695,6 +1027,22 @@ def interact_menu():
 def main():
     try:
         from os_detect import CURRENT_OS
+
+        maybe_use_project_venv()
+
+        if not (os.environ.get("VIRTUAL_ENV") or (sys.prefix != getattr(sys, "base_prefix", sys.prefix))):
+            console.print(Panel(
+                "[bold red]Venv containment is required.[/bold red]\n"
+                "This build is locked to a Python virtual environment to avoid writing to your host system.\n\n"
+                "Create and activate one, then run again:\n"
+                "[bold cyan]python3 -m venv venv-dillons-clapped[/bold cyan]\n"
+                "[bold cyan]source venv-dillons-clapped/bin/activate[/bold cyan]\n"
+                "[bold cyan]pip install -r requirements.txt[/bold cyan]\n"
+                "[bold cyan]./hackingtool-local.sh[/bold cyan]  [dim](or HACKINGTOOL_DEV=1 python3 hackingtool.py)[/dim]",
+                border_style="red",
+                box=box.DOUBLE,
+            ))
+            return
 
         if CURRENT_OS.system == "windows":
             console.print(Panel("[bold red]Please run this tool on Linux or macOS.[/bold red]"))

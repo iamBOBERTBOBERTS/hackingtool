@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+"""Installer and bootstrap workflow for hackingtool."""
+
+# flake8: noqa
+# pylint: disable=missing-module-docstring,missing-function-docstring,wrong-import-position
+# pylint: disable=import-outside-toplevel,line-too-long
+
 import os
 import sys
 import shutil
@@ -23,7 +29,7 @@ from rich import box
 
 from constants import (
     REPO_URL, APP_INSTALL_DIR, APP_BIN_PATH,
-    VERSION, VERSION_DISPLAY,
+    VERSION_DISPLAY,
     USER_CONFIG_DIR, USER_TOOLS_DIR, USER_CONFIG_FILE,
     DEFAULT_CONFIG,
 )
@@ -33,6 +39,26 @@ console = Console()
 
 VENV_DIR_NAME = "venv"
 REQUIREMENTS   = "requirements.txt"
+
+
+def print_dev_mode_section():
+    """Print exact dev env exports and activation commands."""
+    source_dir = Path(__file__).resolve().parent
+    myenv_path = source_dir / "myenv"
+    dotvenv_path = source_dir / ".venv"
+    activate_target = myenv_path if myenv_path.exists() else dotvenv_path
+
+    tools_hint = source_dir / ".hackingtool" / "tools"
+    console.print(Panel(
+        "[bold]Dev mode quick start[/bold]\n"
+        f"export HACKINGTOOL_DEV=1\n"
+        f"export HACKINGTOOL_TOOLS_DIR={tools_hint}\n"
+        f"export HACKINGTOOL_INSTALL_JOBS=4\n"
+        f"source {activate_target}/bin/activate\n"
+        "python3 hackingtool.py",
+        border_style="cyan",
+        box=box.ROUNDED,
+    ))
 
 
 # ── Privilege check ────────────────────────────────────────────────────────────
@@ -88,11 +114,12 @@ def check_os_compatibility():
 def check_internet() -> bool:
     console.print("[dim]Checking internet...[/dim]")
     for host in ("https://github.com", "https://www.google.com"):
-        r = subprocess.run(
+        rc = subprocess.call(
             ["curl", "-sSf", "--max-time", "8", host],
-            capture_output=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
-        if r.returncode == 0:
+        if rc == 0:
             console.print("[success]✔ Internet connection OK[/success]")
             return True
     console.print("[error]✘ No internet connection[/error]")
@@ -253,6 +280,7 @@ def main():
 
     create_launcher()
     create_user_directories()
+    print_dev_mode_section()
 
     console.print(Panel(
         "[bold magenta]Installation complete![/bold magenta]\n\n"

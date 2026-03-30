@@ -1,7 +1,13 @@
+"""Core menu, execution, and tool abstractions for hackingtool."""
+
+# flake8: noqa
+# pylint: disable=missing-module-docstring,missing-class-docstring,missing-function-docstring
+# pylint: disable=line-too-long,import-outside-toplevel,broad-exception-caught,multiple-statements
+
 import os
 import shutil
-import subprocess
 import sys
+import subprocess
 import webbrowser
 from collections.abc import Callable
 from platform import system
@@ -16,7 +22,7 @@ from rich.theme import Theme
 from rich.traceback import install
 
 from constants import (
-    THEME_PRIMARY, THEME_BORDER, THEME_ACCENT,
+    THEME_PRIMARY,
     THEME_SUCCESS, THEME_ERROR, THEME_WARNING,
     THEME_DIM, THEME_ARCHIVED, THEME_URL,
 )
@@ -38,10 +44,18 @@ _theme = Theme({
 console = Console(theme=_theme)
 
 
-def _tools_base() -> str:
-    """Absolute path where git clones and install commands should run."""
-    from config import get_tools_dir
-    return str(get_tools_dir())
+def _is_truthy_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def get_tools_dir() -> str:
+    """Resolve tools directory and log when dev-path behavior is enabled."""
+    from config import get_tools_dir as _cfg_get_tools_dir
+
+    resolved = str(_cfg_get_tools_dir())
+    if _is_truthy_env("HACKINGTOOL_DEV"):
+        console.print(f"[dim]Using dev tools directory: {resolved}[/dim]")
+    return resolved
 
 
 def clear_screen():
@@ -108,6 +122,12 @@ class HackingTool:
     ARCHIVED: bool          = False
     ARCHIVED_REASON: str    = ""
 
+    _BLOCKED_SYSTEM_PATTERNS = (
+        "sudo ", "doas ",
+        "apt ", "apt-get ",
+        "dnf ", "yum ", "pacman ", "zypper ", "apk ", "brew ",
+    )
+
     def __init__(self, options=None, installable=True, runnable=True):
         options = options or []
         if not isinstance(options, list):
@@ -124,7 +144,6 @@ class HackingTool:
     @property
     def is_installed(self) -> bool:
         """Check if the tool's binary is on PATH or its clone dir exists."""
-        base = _tools_base()
         if self.RUN_COMMANDS:
             cmd = self.RUN_COMMANDS[0]
             # Handle "cd foo && binary --help" pattern
@@ -136,15 +155,7 @@ class HackingTool:
             if binary and binary not in (".", "echo", "cd"):
                 if shutil.which(binary):
                     return True
-            # Relative working dir from "cd dir && …" may exist under tools base
-            raw0 = self.RUN_COMMANDS[0]
-            if "&&" in raw0:
-                cd_part = raw0.split("&&")[0].strip()
-                if cd_part.startswith("cd "):
-                    rel = cd_part[3:].strip()
-                    if rel and os.path.isdir(os.path.join(base, rel)):
-                        return True
-        # Check if git clone target dir exists under tools base (not process CWD)
+        # Check if git clone target dir exists
         if self.INSTALL_COMMANDS:
             for ic in self.INSTALL_COMMANDS:
                 if "git clone" in ic:
@@ -152,10 +163,7 @@ class HackingTool:
                     repo_url = [p for p in parts if p.startswith("http")]
                     if repo_url:
                         dirname = repo_url[0].rstrip("/").rsplit("/", 1)[-1].replace(".git", "")
-                        url_idx = parts.index(repo_url[0])
-                        if url_idx + 1 < len(parts) and not parts[url_idx + 1].startswith("-"):
-                            dirname = parts[url_idx + 1]
-                        if os.path.isdir(os.path.join(base, dirname)):
+                        if os.path.isdir(dirname):
                             return True
         return False
 
@@ -218,7 +226,7 @@ class HackingTool:
             elif 1 <= choice <= len(self.OPTIONS):
                 try:
                     self.OPTIONS[choice - 1][1]()
-                except Exception:
+                except (RuntimeError, OSError, ValueError, subprocess.SubprocessError):
                     console.print_exception(show_locals=True)
                 Prompt.ask("[dim]Press Enter to continue[/dim]", default="")
             else:
@@ -226,13 +234,82 @@ class HackingTool:
 
     def before_install(self): pass
 
+    @staticmethod
+    def _in_venv() -> bool:
+        return bool(os.environ.get("VIRTUAL_ENV")) or (sys.prefix != getattr(sys, "base_prefix", sys.prefix))
+
+    @staticmethod
+    def _tools_dir() -> str:
+        return get_tools_dir()
+
+    def _infer_install_subdir(self, tools_dir: str) -> str | None:
+        for cmd in (self.INSTALL_COMMANDS or []):
+            if "git clone" not in cmd:
+                continue
+
+            parts = cmd.split()
+            repo_urls = [p for p in parts if p.startswith("http")]
+            if not repo_urls:
+                continue
+
+            repo_url = repo_urls[0]
+            dirname = repo_url.rstrip("/").rsplit("/", 1)[-1].replace(".git", "")
+            url_idx = parts.index(repo_url)
+            if url_idx + 1 < len(parts):
+                dirname = parts[url_idx + 1]
+
+            return os.path.join(tools_dir, dirname)
+
+        return None
+
+    @staticmethod
+    def _strip_redundant_cd_prefix(cmd: str, subdir_name: str | None) -> str:
+        if not subdir_name:
+            return cmd
+        prefix = f"cd {subdir_name} && "
+        stripped = cmd.strip()
+        if stripped.startswith(prefix):
+            return stripped[len(prefix):]
+        return cmd
+
+    def _blocked_reason(self, cmd: str) -> str | None:
+        lowered = f" {cmd.lower().strip()} "
+        for pat in self._BLOCKED_SYSTEM_PATTERNS:
+            if pat in lowered:
+                return f"blocked system-level command in venv-contained mode: {pat.strip()}"
+        return None
+
+    def _exec(self, cmd: str, style: str = "warning", cwd: str | None = None) -> int:
+        tools_dir = self._tools_dir()
+        if not self._in_venv():
+            console.print("[error]Refusing command: active Python virtual environment is required.[/error]")
+            return 1
+
+        reason = self._blocked_reason(cmd)
+        if reason:
+            console.print(f"[error]Refusing command: {reason}[/error]")
+            return 1
+
+        console.print(f"[{style}]→ {cmd}[/{style}]")
+        effective_cwd = cwd or tools_dir
+        wrapped = f'cd "{effective_cwd}" && {cmd}'
+        return subprocess.run(["bash", "-lc", wrapped], check=False).returncode
+
     def install(self):
         self.before_install()
-        td = _tools_base()
+        tools_dir = self._tools_dir()
+        install_subdir = self._infer_install_subdir(tools_dir)
+        install_subdir_name = os.path.basename(install_subdir) if install_subdir else None
+
         if isinstance(self.INSTALL_COMMANDS, (list, tuple)):
             for cmd in self.INSTALL_COMMANDS:
-                console.print(f"[warning]→ {cmd}[/warning]")
-                subprocess.run(cmd, shell=True, cwd=td, check=False)
+                if "git clone" in cmd:
+                    self._exec(cmd, style="warning", cwd=tools_dir)
+                    continue
+
+                normalized_cmd = self._strip_redundant_cd_prefix(cmd, install_subdir_name)
+                target_cwd = install_subdir if install_subdir and os.path.isdir(install_subdir) else tools_dir
+                self._exec(normalized_cmd, style="warning", cwd=target_cwd)
         self.after_install()
 
     def after_install(self):
@@ -243,11 +320,9 @@ class HackingTool:
 
     def uninstall(self):
         if self.before_uninstall():
-            td = _tools_base()
             if isinstance(self.UNINSTALL_COMMANDS, (list, tuple)):
                 for cmd in self.UNINSTALL_COMMANDS:
-                    console.print(f"[error]→ {cmd}[/error]")
-                    subprocess.run(cmd, shell=True, cwd=td, check=False)
+                    self._exec(cmd, style="error")
         self.after_uninstall()
 
     def after_uninstall(self): pass
@@ -258,7 +333,6 @@ class HackingTool:
             console.print("[warning]Tool is not installed yet. Install it first.[/warning]")
             return
 
-        base = _tools_base()
         updated = False
         for ic in (self.INSTALL_COMMANDS or []):
             if "git clone" in ic:
@@ -267,32 +341,25 @@ class HackingTool:
                 repo_urls = [p for p in parts if p.startswith("http")]
                 if repo_urls:
                     dirname = repo_urls[0].rstrip("/").rsplit("/", 1)[-1].replace(".git", "")
-                    url_idx = parts.index(repo_urls[0])
-                    if url_idx + 1 < len(parts) and not parts[url_idx + 1].startswith("-"):
-                        dirname = parts[url_idx + 1]
-                    repo_path = os.path.join(base, dirname)
-                    if os.path.isdir(repo_path):
-                        console.print(f"[cyan]→ git -C {repo_path} pull[/cyan]")
-                        subprocess.run(
-                            ["git", "-C", repo_path, "pull"],
-                            check=False,
-                        )
+                    if os.path.isdir(dirname):
+                        console.print(f"[cyan]→ git -C {dirname} pull[/cyan]")
+                        self._exec(f"git -C {dirname} pull", style="cyan")
                         updated = True
             elif "pip install" in ic:
                 # Re-run pip install (--upgrade)
                 upgrade_cmd = ic.replace("pip install", "pip install --upgrade")
                 console.print(f"[cyan]→ {upgrade_cmd}[/cyan]")
-                subprocess.run(upgrade_cmd, shell=True, cwd=base, check=False)
+                self._exec(upgrade_cmd, style="cyan")
                 updated = True
             elif "go install" in ic:
                 # Re-run go install (fetches latest)
                 console.print(f"[cyan]→ {ic}[/cyan]")
-                subprocess.run(ic, shell=True, cwd=base, check=False)
+                self._exec(ic, style="cyan")
                 updated = True
             elif "gem install" in ic:
                 upgrade_cmd = ic.replace("gem install", "gem update")
                 console.print(f"[cyan]→ {upgrade_cmd}[/cyan]")
-                subprocess.run(upgrade_cmd, shell=True, cwd=base, check=False)
+                self._exec(upgrade_cmd, style="cyan")
                 updated = True
 
         if updated:
@@ -302,7 +369,8 @@ class HackingTool:
 
     def _get_tool_dir(self) -> str | None:
         """Find the tool's local directory — clone target, pip location, or binary path."""
-        base = _tools_base()
+        tools_dir = self._tools_dir()
+
         # 1. Check git clone target dir
         for ic in (self.INSTALL_COMMANDS or []):
             if "git clone" in ic:
@@ -313,11 +381,13 @@ class HackingTool:
                     dirname = repo_urls[0].rstrip("/").rsplit("/", 1)[-1].replace(".git", "")
                     # Check custom target dir (arg after URL)
                     url_idx = parts.index(repo_urls[0])
-                    if url_idx + 1 < len(parts) and not parts[url_idx + 1].startswith("-"):
+                    if url_idx + 1 < len(parts):
                         dirname = parts[url_idx + 1]
-                    full = os.path.join(base, dirname)
-                    if os.path.isdir(full):
-                        return os.path.abspath(full)
+                    if os.path.isdir(dirname):
+                        return os.path.abspath(dirname)
+                    candidate = os.path.join(tools_dir, dirname)
+                    if os.path.isdir(candidate):
+                        return os.path.abspath(candidate)
 
         # 2. Check binary location via which
         if self.RUN_COMMANDS:
@@ -327,9 +397,11 @@ class HackingTool:
                 cd_part = cmd.split("&&")[0].strip()
                 if cd_part.startswith("cd "):
                     d = cd_part[3:].strip()
-                    full = os.path.join(base, d)
-                    if os.path.isdir(full):
-                        return os.path.abspath(full)
+                    if os.path.isdir(d):
+                        return os.path.abspath(d)
+                    candidate = os.path.join(tools_dir, d)
+                    if os.path.isdir(candidate):
+                        return os.path.abspath(candidate)
             binary = cmd.split()[0] if cmd else ""
             if binary.startswith("sudo"):
                 binary = cmd.split()[1] if len(cmd.split()) > 1 else ""
@@ -345,11 +417,11 @@ class HackingTool:
         if tool_dir:
             console.print(f"[success]Opening folder: {tool_dir}[/success]")
             console.print("[dim]Type 'exit' to return to hackingtool.[/dim]")
-            os.system(f'cd "{tool_dir}" && $SHELL')
+            subprocess.run(["bash", "-lc", f'cd "{tool_dir}" && "$SHELL"'], check=False)
         else:
             console.print("[warning]Tool directory not found.[/warning]")
             if self.PROJECT_URL:
-                console.print(f"[dim]You can clone it manually:[/dim]")
+                console.print("[dim]You can clone it manually:[/dim]")
                 console.print(f"[cyan]  git clone {self.PROJECT_URL}.git[/cyan]")
 
     def before_run(self): pass
@@ -359,7 +431,7 @@ class HackingTool:
         if isinstance(self.RUN_COMMANDS, (list, tuple)):
             for cmd in self.RUN_COMMANDS:
                 console.print(f"[cyan]⚙ Running:[/cyan] [bold]{cmd}[/bold]")
-                os.system(cmd)
+                self._exec(cmd, style="cyan")
         self.after_run()
 
     def after_run(self): pass
@@ -506,7 +578,7 @@ class HackingToolsCollection:
                     console.print(f"\n[bold cyan]({i}/{len(not_installed)})[/bold cyan] {tool.TITLE}")
                     try:
                         tool.install()
-                    except Exception:
+                    except (RuntimeError, OSError, ValueError, subprocess.SubprocessError):
                         console.print(f"[error]✘ Failed: {tool.TITLE}[/error]")
                 Prompt.ask("\n[dim]Press Enter to continue[/dim]", default="")
             elif choice == 98 and archived:
@@ -514,7 +586,7 @@ class HackingToolsCollection:
             elif 1 <= choice <= len(active):
                 try:
                     active[choice - 1].show_options(parent=self)
-                except Exception:
+                except (RuntimeError, OSError, ValueError, subprocess.SubprocessError):
                     console.print_exception(show_locals=True)
                     Prompt.ask("[dim]Press Enter to continue[/dim]", default="")
             else:

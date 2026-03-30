@@ -3,3 +3,4 @@
 # flask is unused — removed
 # requests is unused at runtime — removed
 rich>=13.0.0
+pytest>=8.0.0

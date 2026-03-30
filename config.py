@@ -1,6 +1,9 @@
+"""Configuration helpers for hackingtool runtime settings."""
+
 import json
 import logging
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -14,21 +17,10 @@ def load() -> dict[str, Any]:
     if USER_CONFIG_FILE.exists():
         try:
             on_disk = json.loads(USER_CONFIG_FILE.read_text())
-            cfg: dict[str, Any] = {**DEFAULT_CONFIG, **on_disk}
+            return {**DEFAULT_CONFIG, **on_disk}
         except (json.JSONDecodeError, OSError) as exc:
             logger.warning("Config file unreadable (%s), using defaults.", exc)
-            cfg = dict(DEFAULT_CONFIG)
-    else:
-        cfg = dict(DEFAULT_CONFIG)
-
-    # Session overrides — dev workflow / explicit path without editing config.json
-    explicit = os.environ.get("HACKINGTOOL_TOOLS_DIR", "").strip()
-    if explicit:
-        cfg["tools_dir"] = str(Path(explicit).expanduser().resolve())
-    elif os.environ.get("HACKINGTOOL_DEV", "").lower() in ("1", "true", "yes"):
-        cfg["tools_dir"] = str(resolve_default_tools_dir())
-
-    return cfg
+    return dict(DEFAULT_CONFIG)
 
 
 def save(cfg: dict[str, Any]) -> None:
@@ -44,12 +36,27 @@ def get_tools_dir() -> Path:
     Always an absolute path — never relies on process CWD.
     """
     cfg = load()
-    tools_dir = Path(cfg.get("tools_dir", str(USER_TOOLS_DIR))).expanduser().resolve()
-    tools_dir.mkdir(parents=True, exist_ok=True)
-    return tools_dir
+    configured = cfg.get("tools_dir", str(resolve_default_tools_dir()))
+    tools_dir = Path(configured).expanduser().resolve()
+
+    try:
+        tools_dir.mkdir(parents=True, exist_ok=True)
+        if not os.access(tools_dir, os.W_OK | os.X_OK):
+            raise PermissionError(f"insufficient permissions for {tools_dir}")
+        return tools_dir
+    except PermissionError as exc:
+        fallback = Path(USER_TOOLS_DIR).expanduser().resolve()
+        logger.warning("Tools directory not writable (%s). Falling back to %s", exc, fallback)
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
+
+
+def get_privacy_mode() -> bool:
+    """Return whether privacy-safe output is enabled (default True)."""
+    cfg = load()
+    return bool(cfg.get("privacy_mode", True))
 
 
 def get_sudo_cmd() -> str:
     """Return 'doas' if available, else 'sudo'. Never hardcode 'sudo'."""
-    import shutil
     return "doas" if shutil.which("doas") else "sudo"
